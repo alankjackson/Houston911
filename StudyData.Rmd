@@ -1,0 +1,608 @@
+---
+title: "Study the data"
+author: "Alan Jackson"
+date: "2022-11-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(stringr)
+library(sf)
+library(leaflet)
+library(leaflet.extras)
+library(postmastr)
+library(GeocodeHou)
+
+googlecrs <- "EPSG:4326" # lat long
+CoH_crs <- "EPSG:2278" # X-Y
+
+path <- "/home/ajackson/Dropbox/Rprojects/Curated_Data_Files/HFD_Incidents/"
+datapath <- "/home/ajackson/Dropbox/Rprojects/Curated_Data_Files/"
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##    read in the extant files
+
+Read in the files that have been downloaded so far
+
+```{r read in, message=FALSE, warning=FALSE}
+
+filenames <- list.files(path = paste0(path, "Incrementals/"),
+                        pattern="*_table.rds$")
+
+filenames <- paste0(paste0(path, "Incrementals/"),filenames)
+
+df <- filenames %>% 
+  purrr::map_dfr(readRDS) %>% 
+  unique() # get rid of duplicates
+
+df <- df %>% 
+  rename(Incident_type=`Incident Type`, 
+         Cross_street=`Cross Street`,
+         Call_time=`Call Time(Opened)`,
+         Combined=`Combined Response`,
+         Key=`Key Map`)
+
+df <- df %>% 
+  mutate(Incident_type=stringr::str_replace(Incident_type, "fire", "Fire")) %>% 
+  mutate(Incident_type=stringr::str_replace(Incident_type, "FIRE", "Fire")) %>% 
+  mutate(Incident_type=stringr::str_replace(Incident_type, "EVENT", "Event")) %>% 
+  mutate(Incident_type=stringr::str_replace(Incident_type, "Ems", "EMS")) %>% 
+  mutate(Incident_type=stringr::str_replace(Incident_type, "Leaking", "Leak")) %>% 
+  mutate(Incident_type=stringr::str_replace(Incident_type, " on ", " "))  
+  
+
+```
+
+words
+
+```{r summary of types, message=FALSE, warning=FALSE}
+
+df_summary <- df %>% 
+  group_by(Incident_type) %>% 
+    summarize(n=n())
+
+df <- df %>% 
+  mutate(Category=case_when(
+    str_detect(Incident_type, "Fire") ~ "Fire",
+    str_detect(Incident_type, "EMS") ~ "EMS",
+    str_detect(Incident_type, "Check Patient") ~ "Check Patient",
+    str_detect(Incident_type, "CRASH") ~ "Crash",
+    str_detect(Incident_type, "TRAFFIC") ~ "Crash",
+    str_detect(Incident_type, "Vehicle") ~ "Crash",
+    str_detect(Incident_type, "Motorcycle") ~ "Crash",
+    str_detect(Incident_type, "Gas") ~ "Gas Leak",
+    str_detect(Incident_type, "Alarm") ~ "Alarm",
+    str_detect(Incident_type, "Smoke Detector") ~ "Alarm",
+    str_detect(Incident_type, "Pedestrian") ~ "Pedestrian",
+    str_detect(Incident_type, "Arcing") ~ "Electrical",
+    str_detect(Incident_type, "Transformer") ~ "Electrical",
+    str_detect(Incident_type, "Wire") ~ "Electrical",
+    str_detect(Incident_type, "Electrical") ~ "Electrical",
+    str_detect(Incident_type, "Elevator") ~ "Elevator",
+    TRUE ~ "Other"
+  ))
+
+df %>% 
+  group_by(Category) %>% 
+    summarize(n=n()) %>% 
+  arrange(-n) %>% 
+  gt::gt()
+
+df_sum <- df %>%
+  group_by(Key) %>% 
+    summarize(num=n())
+
+```
+
+
+##   attach keymaps and census data
+
+
+
+```{r coordinates}
+
+Keyfiles <- readRDS(paste0("/home/ajackson/Dropbox/Rprojects/Curated_Data_Files/Keymaps/", "Trans_Tab.rds"))
+Keypolys <- readRDS(paste0("/home/ajackson/Dropbox/Rprojects/Curated_Data_Files/Keymaps/", "Trans_Tab_Poly_ll.rds"))
+
+df <- df %>% 
+  mutate(Seq=row_number()) %>% 
+  mutate(Time=lubridate::hour(lubridate::mdy_hm(Call_time))) %>% 
+  mutate(Daytime=if_else(Time<6|Time>18,FALSE, TRUE))
+
+dfnew <- left_join(df, Keyfiles, by="Key")
+dfnew <- sf::st_as_sf(dfnew)
+
+#     Many have no Key, but some have an address. Geocode and then match to Key
+
+foo <- dfnew %>% 
+  filter(Key=="") %>% 
+  filter(!Address=="") %>% 
+  mutate(Zip="77000") %>% #  bogus zipcode
+  mutate(St_num=stringr::str_extract(Address, "^\\d*")) %>% 
+  filter(!St_num=="") 
+foo <- pm_identify(foo, var="Address") # add ID fields
+foo2 <- pm_prep(foo, var="Address", type="street") # Prep data
+foo2 <- pm_houseFrac_parse(foo2)
+foo2 <- pm_house_parse(foo2)
+foo2 <- pm_streetDir_parse(foo2)
+foo2 <- pm_streetSuf_parse(foo2)
+foo2 <- pm_street_parse(foo2)
+foo2 <- foo2 %>% 
+  mutate(pm.street=str_to_upper(pm.street)) %>% 
+  mutate(pm.streetSuf=str_to_upper(pm.streetSuf)) %>% 
+  mutate(pm.preDir=replace_na(pm.preDir, "")) %>% 
+  mutate(pm.streetSuf=replace_na(pm.streetSuf, ""))
+foo <- pm_replace(foo2, source=foo)
+
+match <- NULL
+for (i in 1:nrow(foo)){ # match to get zipcode
+  if (is.na(foo[i,]$pm.street)) {next}
+  print(paste("i=",i))
+  tmp <- GeocodeHou::repair_zipcode(foo[i,]$pm.house, 
+                        foo[i,]$pm.preDir,
+                        foo[i,]$pm.street,
+                        foo[i,]$pm.streetSuf, 
+                        foo[i,]$Zip)
+  if (tmp$Success){ #   success
+    print(paste("Success", tmp$Lat, tmp$Lon, tmp$New_zipcode))
+    match <- cbind(foo[i,], tmp) %>% 
+      select(pm.house, pm.preDir, pm.street, pm.streetSuf, New_zipcode, Seq, Lat, Lon) %>% 
+      rbind(., match)
+  } else { #  Fail exact match
+    print(paste("Failed", tmp$Fail))
+  }
+}
+
+#   Use lat long to find which keymap key
+
+match_ll <- st_as_sf(match, coords=c("Lon", "Lat"), crs=googlecrs) 
+
+aaa <- st_intersects(st_transform(match_ll, crs=CoH_crs), 
+                     st_transform(Keypolys, crs=CoH_crs), 
+                     sparse=TRUE) 
+
+aaab <-Keypolys[unlist(aaa),] %>% 
+  st_drop_geometry() %>% 
+  select(Key) %>% 
+  bind_cols(., st_drop_geometry(match_ll)) %>% 
+  select(Key, Seq)
+
+mask <- dfnew$Seq %in% aaab$Seq
+
+dfnew[dfnew$Seq %in% aaab$Seq,]$Key <- aaab$Key
+
+#   Drop rows without a Keymap code
+  
+dfnew <- dfnew %>% 
+  filter(!Key=="")
+
+##############
+#   Find Keymap codes not fully inside both Houston and Harris county and drop
+##############
+
+CityBdy <- readRDS(paste0(datapath, "Neighborhoods/City_polys.rds"))
+
+leaflet(CityBdy) %>% 
+  leaflet::setView(lng = -95.3103, lat = 29.7752, zoom = 8 ) %>%   
+  addTiles() %>% 
+  addPolygons()
+
+HarrisBdy <- readRDS(paste0(datapath, 
+                            "City_and_County_bdys/HGAC_County_bdys.Rds")) %>% 
+  filter(FIPS=="48201")
+
+#     Trim by county
+foo <- st_covered_by(st_transform(Keypolys, crs=CoH_crs), 
+                     st_transform(HarrisBdy, crs = CoH_crs), 
+                     sparse = TRUE)
+fool <- as.logical(foo)
+fool[is.na(fool)] <- FALSE
+foo2 <- Keypolys[fool,]
+
+#     Trim by city
+foo3 <- st_covered_by(st_transform(foo2, crs=CoH_crs), 
+                     st_transform(CityBdy, crs = CoH_crs), 
+                     sparse = TRUE)
+fool <- as.logical(foo3)
+fool[is.na(fool)] <- FALSE
+FinalKeypolys <- foo2[fool,]
+
+#   Sum up by Keymap, daytime or night, and Category
+
+dfnew_sum <- dfnew %>% 
+  group_by(Category, Key, Daytime) %>% 
+    summarise(n=n())
+
+#   Attach some census data
+
+censuspath <- "/home/ajackson/Dropbox/Rprojects/Curated_Data_Files/Census_data/"
+censusKey <- readRDS(paste0(censuspath, "Census_data_by_Keymap_2020.rds")) %>% 
+  select(Key, Pop, Pop_white, Pop_black, Pop_asian, Pop_hispanic, Pop_not_hisp,
+         Pop_blk_grpE, Aggreg_incE) %>% 
+  mutate(Avg_income=na_if(Aggreg_incE/Pop_blk_grpE, Inf))
+
+df_all <- left_join(dfnew_sum, censusKey, by="Key")
+
+df_all_poly <- left_join(st_drop_geometry(df_all), FinalKeypolys, by="Key")
+df_all_poly <- df_all_poly %>% 
+  filter(!is.na(X))
+df_all_poly <- sf::st_as_sf(df_all_poly)
+
+```
+
+##        Crossplots
+
+```{r crossplots}
+
+foo <- df_EMS_nite %>% 
+  filter(!is.na(Pop)) %>% 
+  filter(Pop>100) %>% 
+  mutate(percap=n/Pop)
+
+foo %>% 
+  ggplot(aes(y=Avg_income, x=percap)) +
+    geom_point()
+
+
+
+```
+
+
+##    Some maps of polygons
+
+```{r}
+
+#   First just raw numbers
+
+df_EMS_day <- df_all_poly %>% 
+  filter(Category=="EMS") %>% 
+  filter(n>10) %>% 
+  filter(Daytime)
+
+df_EMS_day %>% 
+  filter(n>50) %>%  
+ggplot() +
+  Base_basemapR +
+  geom_sf(aes(fill=n), alpha=0.3)+
+  scale_fill_gradientn(colors=rainbow(5), limits=c(50,300))
+
+df_EMS_nite <- df_all_poly %>% 
+  filter(Category=="EMS") %>% 
+  filter(n>10) %>% 
+  filter(!Daytime)
+
+df_EMS_nite %>% 
+  filter(n>50) %>%  
+ggplot() +
+  Base_basemapR +
+  geom_sf(aes(fill=n), alpha=0.3)+
+  scale_fill_gradientn(colors=rainbow(5), limits=c(50,300))
+
+#   Improved scales
+
+  pal <- colorQuantile(palette = heat.colors(5), 
+                       domain = df_EMS$n, 
+                       n = 5, 
+                       na.color = "transparent", 
+                       alpha = FALSE, 
+                       right = FALSE) 
+
+df_EMS %>% 
+ggplot() +
+  Base_basemapR +
+  geom_sf(aes(fill=n), alpha=0.3)+
+  scale_fill_gradientn(colors=pal(df_EMS$n))
+
+
+#     Let's do per capita
+
+#   First the blocks with no people resident
+
+df_EMS %>% 
+  filter(is.na(Pop)) %>% 
+  ggplot() +
+    Base_basemapR +
+    geom_sf(aes(fill=n), alpha=0.3)+
+    scale_fill_gradientn(colors=rainbow(5), limits=c(10,200))
+  
+#   These are either the airport or outside of Harris County
+
+#   Now do per capita
+
+df_EMS_nite %>% 
+  filter(!is.na(Pop)) %>% 
+  mutate(percap=n/Pop) %>% 
+  ggplot() +
+    Base_basemapR +
+    geom_sf(aes(fill=percap), alpha=0.3)+
+    scale_fill_gradientn(colors=rainbow(5), limits=c(0, 2))
+  
+#   Let's look at blocks with real population.
+
+df_EMS_nite %>% 
+  filter(!is.na(Pop)) %>% 
+  summary()
+
+df_EMS_nite %>% 
+  filter(!is.na(Pop)) %>% 
+  filter(Pop>1000) %>% 
+  mutate(percap=n/Pop) %>% 
+  filter(percap>0.01) %>% 
+  ggplot() +
+    Base_basemapR +
+    geom_sf(aes(fill=percap), alpha=0.3)+
+    scale_fill_gradientn(colors=rainbow(5), limits=c(0.01, 0.1))
+
+```
+
+
+
+##    Let's make some maps
+
+```{r maps}
+
+
+dfnew %>%
+  leaflet() %>% 
+  addTiles() %>% 
+  addMarkers(clusterOptions = markerClusterOptions(),
+             label=~as.character(Key))
+
+dfnew %>%
+  filter(str_detect(Incident_type, "Dumpster")) %>% 
+  leaflet() %>% 
+  addTiles() %>% 
+  addMarkers(clusterOptions = markerClusterOptions())
+
+dfnew %>%
+  filter(str_detect(Incident_type, "CRASH")) %>% 
+  leaflet() %>% 
+  addTiles() %>% 
+  addMarkers(clusterOptions = markerClusterOptions(),
+             label=~as.character(Key))
+
+dfnew %>%
+  filter(str_detect(Incident_type, "Fire")) %>% 
+  leaflet() %>% 
+  addTiles() %>% 
+  addMarkers(clusterOptions = markerClusterOptions(),
+             label=~as.character(Key))
+
+```
+###  Let's make contour maps
+
+```{r contour maps}
+
+googlecrs <- "EPSG:4326" # lat long
+CoH_crs <- "EPSG:2278" # X-Y
+
+#   Let's define a bounding box (an AOI) based on the data (in Lat-Long)
+
+bbox <- sf::st_bbox(dfnew_sum)
+
+#   Expand box by 20% to give a little extra room
+Dx <- (bbox[["xmax"]]-bbox[["xmin"]])*0.1
+Dy <- (bbox[["ymax"]]-bbox[["ymin"]])*0.1
+bbox["xmin"] <- bbox["xmin"] - Dx
+bbox["xmax"] <- bbox["xmax"] + Dx
+bbox["ymin"] <- bbox["ymin"] - Dy
+bbox["ymax"] <- bbox["ymax"] + Dy
+
+bb <- c(bbox["xmin"], bbox["ymin"], bbox["xmax"], bbox["ymax"])
+
+#     Basemap
+
+Base_basemapR <- basemapR::base_map(bbox, basemap="mapnik", increase_zoom=2)
+
+#     Density maps
+
+Sta_den <- eks::st_kde(dfnew_sum) # calculate density
+
+#   Lay down basemap
+ggplot() +
+  #   this is the best looking basemap
+  Base_basemapR +
+  #   Add points
+  geom_sf(data=dfnew_sum) +
+  #   Create filled density "contours" 
+  geom_sf(data=eks::st_get_contour(Sta_den,
+                                   cont=c(20,40,60,80)),   
+          aes(fill=eks::label_percent(contlabel)), alpha=0.4) +
+  #   Legend
+  colorspace::scale_fill_discrete_sequential(name = "Density Percentile") +
+  #   Add a scale bar
+  ggspatial::annotation_scale(data=dfnew_sum, aes(unit_category="imperial", style="ticks"),
+    location="br", width_hint=0.2, bar_cols=1) +
+ #   This is an alternative way to add a scale
+  #   Add title
+  ggtitle("Density of Measurements") +
+  labs(subtitle="Density using EKS") +
+  coord_sf(crs=googlecrs) # required 
+
+
+```
+
+###   Build grid and fit data
+
+```{r grid data}
+
+#     XY box
+
+bbox_xy = bbox %>%
+  sf::st_as_sfc() %>%
+  sf::st_transform(crs = CoH_crs) %>%
+  sf::st_bbox()
+
+#     sfc POINT file
+grd_sf <- sf::st_make_grid(x=bbox_xy,
+                                  what="corners",
+                                  cellsize=200,
+                                  crs=CoH_crs
+                                  )
+#   Project data to XY
+
+df_xy <- sf::st_transform(dfnew_sum, crs=CoH_crs)
+df_xy_ems <- df_xy %>% 
+  filter(Category=="EMS") %>% 
+  mutate(n = log(n))
+
+
+#   Restrict grid with convex hull
+
+ch <- st_convex_hull(st_union(df_xy_ems %>% filter(n>2)))
+
+#     Create interpolator and interpolate to grid
+
+fit_IDW <- gstat::gstat( 
+  formula = n ~ 1,
+  data = df_xy_ems, 
+  nmax = 10, nmin = 3, # can also limit the reach with these numbers
+  #set = list(idp = 3) # inverse distance power
+)
+#   Use predict to apply the model fit to the grid (using the data frame grid
+#   version)
+
+#           We set debug.level to turn off annoying output
+interp_IDW <- predict(fit_IDW, grd_sf, debug.level=0)
+
+#   Convert to a stars object so we can use the contouring in stars
+interp_IDW_stars <- stars::st_rasterize(interp_IDW %>% 
+                            dplyr::select(N=var1.pred, geometry))
+
+#   Quick sanity check, and can use to adjust the distance power Looks pretty
+#   good - most input points look close to the output grid points, with some
+#   notable exceptions. The red point to the north is possibly bad data. Easier
+#   to judge from areal displays.
+ggplot() +
+  #   geom_stars is a good way to display a grid
+  stars::geom_stars(data=st_crop(interp_IDW_stars, ch)) +  
+  geom_sf(data=df_xy, aes(color=n), size=2) +
+  geom_sf(data=df_xy, color="Black", size=.1) +
+  #     This is for the raster color fill
+  scale_fill_gradientn(colors=rainbow(5), limits=c(1,max(df_xy_ems$n, na.rm=TRUE))) +
+  #     This is for the original data points
+  scale_color_gradientn(colors=rainbow(5), limits=c(1,max(df_xy_ems$n, na.rm=TRUE))) +
+  labs(title="Inverse Distance Weighting, Power = 3")
+
+#     MAE
+#   Do a leave-one-out analysis for a variety of weighting powers
+
+Validate <- NULL
+for (power in (4:8)*0.5) {
+  print(paste("power =", power))
+  my_fit <- gstat::gstat(formula = n ~ 1, data = df_xy,  set = list(idp = power))
+  foo <- sf::st_as_sf(gstat::gstat.cv(my_fit, debug.level=0, verbose=FALSE)) %>% 
+    rename(Observed=observed, Predicted=var1.pred ) %>% 
+    mutate(power=power) 
+  
+  Validate <- bind_rows(Validate, foo)
+}
+MAE <- Validate %>% 
+  group_by(power) %>% 
+  summarise(MAE=(sum(abs(Predicted-Observed)) / n()))
+
+MAE %>% 
+  ggplot(aes(x=power, y=MAE)) +
+    geom_point() +
+    geom_smooth() +
+    labs(title="MAE Error vs. Inverse Distance Weighting Power")
+
+#     Map
+
+brks <- seq(from = 2, to = 7, by = 1)
+#   Create contour lines
+Contours_IDW <- stars::st_contour(interp_IDW_stars, contour_lines=TRUE, breaks=brks)
+Contours_IDW <- st_crop(Contours_IDW, ch)
+#   Plot to see what it all looks like
+ggplot() +
+  stars::geom_stars(data=st_crop(interp_IDW_stars, ch)) +  
+  #geom_sf(data=df_xy, aes(color=n), size=5) +
+  geom_sf(data=df_xy, color="Black", size=1) +
+  scale_fill_gradientn(colors=rainbow(5), limits=c(0,7)) +
+  #scale_color_gradientn(colors=rainbow(5), limits=c(0,7)) +
+  geom_sf(data=Contours_IDW, color="black") 
+
+
+#   Hmmm.... could use some smoothing
+#   But stars does not have focal operations, so we go to terra?
+
+foo_terra <- terra::rast(interp_IDW_stars) 
+
+#   Let's do a 3x3 mean (could also use a median in some circumstances)
+foo_sm <- terra::focal(foo_terra, w=5, fun=mean)
+
+#   Create contours again
+Contours_sm <- stars::st_contour(stars::st_as_stars(foo_sm), contour_lines=TRUE, breaks=brks)
+
+#  One more step - let's smooth the contours themselves - really just
+#  aesthetically round off the pointy bits
+Contours_sm2 <- smoothr::smooth(Contours_sm, method="ksmooth", smoothness=2) %>% 
+  st_intersection(.,ch)
+
+#   and our final plot in X-Y space
+ggplot() +
+  stars::geom_stars(data=stars::st_as_stars(foo_sm) %>% 
+                      rename(EMS=focal_mean) %>% 
+                      st_crop(ch)) +  
+  #geom_sf(data=df_xy, aes(color=n), size=5) +
+  geom_sf(data=df_xy, color="Black", size=1) +
+  #scale_color_gradientn(colors=rainbow(5), limits=c(0,3)) +
+  scale_fill_gradientn(colors=rainbow(5), limits=c(0,7), na.value="transparent") +
+  #geom_sf(data=Contours_IDW, color="red") +
+  geom_sf(data=st_crop(Contours_sm2, ch), color="blue") +
+  annotate("text", label="C.I. = 0.5 inches of rain", 
+           x=bbox_xy[['xmin']]+1000, 
+           y=bbox_xy[['ymin']]-1000,
+           hjust="inward", size = 3) +
+    labs(title="Final X-Y plot of Inverse Weighted data",
+       subtitle="Red contours are original, Blue are final, color fill is smoothed data.")
+
+##################    final map
+
+Contours_LL <- sf::st_transform(Contours_sm, crs=googlecrs) 
+
+foo_sm_star_LL <- sf::st_transform(stars::st_as_stars(foo_sm) %>%
+                                     rename(EMS=focal_mean) %>% 
+                                     st_crop(ch),
+                                     crs=googlecrs)
+
+ggplot() +
+  #   this is the best looking basemap
+  Base_basemapR +
+  #   Gridded data
+  stars::geom_stars(data=foo_sm_star_LL, alpha=0.4) +  
+  #   Add points
+  #geom_sf(data=dfnew_sum) +
+  #   Create filled density "contours" 
+  geom_sf(data=Contours_LL, color="black") +
+  scale_fill_viridis_c(direction=-1, alpha=0.4) +
+  #   Add a scale bar
+  ggspatial::annotation_scale(data=dfnew_sum, aes(unit_category="imperial",
+                                              style="ticks"),
+    location="br", width_hint=0.2, bar_cols=1) +
+  #   Add CI annotation at specified window coordinates
+  annotate("text", label="C.I. = log EMS calls", 
+           x=-Inf, 
+           y=-Inf,
+           hjust="inward", vjust="inward", size = 3) +
+  # annotation_custom(grid::textGrob(label = "C.I. = 0.5 inches of rain",
+  #                                  just=c("left", "bottom"),
+  #                                  gp=grid::gpar(fontsize=6),
+  #                                x = unit(0.2, "npc"),
+  #                                y = unit(0.02, "npc")))+
+  #geom_contour(data=as_tibble(foo_sm_star_LL),
+  #             aes(x=x, y=y, z=EMS)
+  #             )+
+  coord_sf(crs=googlecrs) + # required 
+  #   Add title
+  labs(title="Rainfall Measurements",
+       subtitle="Inverse Distance Weighting interpolation",
+       x="Longitude", y="Latitude")
+
+
+
+```
+
