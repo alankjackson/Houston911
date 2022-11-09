@@ -110,7 +110,7 @@ Keypolys <- readRDS(paste0("/home/ajackson/Dropbox/Rprojects/Curated_Data_Files/
 df <- df %>% 
   mutate(Seq=row_number()) %>% 
   mutate(Time=lubridate::hour(lubridate::mdy_hm(Call_time))) %>% 
-  mutate(Daytime=if_else(Time<6|Time>18,FALSE, TRUE))
+  mutate(Daytime=if_else(Time<8|Time>20,"Night", "Day"))
 
 dfnew <- left_join(df, Keyfiles, by="Key")
 dfnew <- sf::st_as_sf(dfnew)
@@ -237,14 +237,189 @@ df_all_poly <- sf::st_as_sf(df_all_poly)
 
 ```{r crossplots}
 
-foo <- df_EMS_nite %>% 
-  filter(!is.na(Pop)) %>% 
+foo <- df_all_poly %>% 
+  filter(Category=="EMS") %>% 
+  filter(n>10) %>%
   filter(Pop>100) %>% 
   mutate(percap=n/Pop)
 
 foo %>% 
-  ggplot(aes(y=Avg_income, x=percap)) +
-    geom_point()
+  ggplot(aes(x=n/Pop)) +
+    geom_histogram()
+
+Cpath <- "/home/ajackson/Dropbox/Rprojects/Curated_Data_Files/Census_data/"
+
+Blocks <- readRDS(paste0(Cpath, "Pop_data_by_block_2020.rds"))
+
+leaflet(foo %>% filter(percap>0.15)) %>% 
+  leaflet::setView(lng = -95.3103, lat = 29.7752, zoom = 8 ) %>%   
+  addTiles() %>% 
+  addPolygons(data=Blocks, popup = ~as.character(Pop), color="red") %>% 
+  addPolygons(popup = ~Key, weight=1)  
+```
+
+##  Lessons
+
+Some keymap names are consistently entered incorrectly. Many of the calls to
+575H are really just to the east in 576E (Redford Apartments). Population
+estimates for some keymap blocks are way off. 
+
+```{r plots}
+
+#   Time evolution of Redford calls
+df %>% 
+  filter(Category=="EMS") %>% 
+  filter(stringr::str_detect(Address, "REDFORD")) %>% 
+  mutate(Datetime=lubridate::mdy_hm(Call_time)) %>% 
+  mutate(week=lubridate::round_date(Datetime, unit="week")) %>% 
+  group_by(week) %>% 
+     summarize(n=n()) %>% 
+  ggplot(aes(x=week, y=n)) +
+  geom_point()+
+  geom_smooth() +
+  labs(title="Redford Apartments, EMS calls",
+       x="Date",
+       y="Incidents per week")
+
+#   Incidents by hour of day
+
+df %>% 
+  ggplot(aes(x=Time)) +
+  geom_histogram(binwidth=1)+
+    facet_wrap(~Category, scales="free_y")
+
+#   Split into day and night
+
+df_EMS <- df_all_poly %>% 
+  filter(Category=="EMS") %>% 
+  #filter(n>10) %>% # Drop low numbers
+  filter(!is.na(Pop)) %>% 
+  filter(Pop>100) %>% 
+  mutate(percap=n/Pop)
+
+df_EMS_day <- df_EMS %>% 
+  filter(Daytime=="Day")  
+
+df_EMS_nite <- df_EMS %>% 
+  filter(Daytime=="Night")  
+
+df_EMS %>% 
+  ggplot(aes(x=Pop))+
+  geom_histogram()+
+  labs(title="Estimated Population per Keymap Block")
+
+df_EMS %>% 
+  ggplot(aes(x=n)) +
+  geom_histogram()+
+  labs(title="Number of EMS calls per Keymap Block")
+
+df_EMS %>% 
+  filter(Daytime=="Day") %>% 
+  ggplot(aes(x=n)) +
+  geom_histogram()+
+  labs(title="Number of EMS calls per Keymap Block - in the day")
+
+
+df_EMS %>% 
+  ggplot(aes(y=n, x=Pop, color=Daytime)) +
+    geom_point() +
+    geom_smooth(method="lm")+
+    labs(title="EMS Calls Incidents vs Population and Time of Day",
+         x="Estimated Population",
+         y="Number of EMS incidents")
+
+Labels <- tribble(~Key, ~Label,
+                  "493M", "County Jail",
+                  "493L", "W Downtown (Police HQ)",
+                  "493Q", "S Downtown (Bus station)",
+                  "491U", "Galleria",
+                  "373N", "Greenspoint",
+                  "575B", "Hobby") %>% 
+  left_join(., df_EMS, by="Key")
+
+df_EMS %>% 
+  #ggplot(aes(y=n, x=Pop)) +
+  ggplot(aes(y=n, x=Pop, color=Daytime)) +
+    geom_point() +
+    geom_smooth(method="lm")+
+    geom_text(data=Labels, aes(y=n, x=Pop, label=Label),
+              hjust=0, vjust=0)+
+    labs(title="EMS Calls Incidents vs Population at Keymap grids",
+         x="Estimated Population",
+         y="Number of EMS incidents")
+
+df_EMS %>% 
+  filter(n<300) %>% 
+  #ggplot(aes(y=n, x=Pop)) +
+  ggplot(aes(y=n, x=Avg_income, color=Daytime)) +
+    geom_point() +
+    geom_smooth(method="lm")+
+    #geom_text(data=Labels, aes(y=n, x=Avg_income, label=Label),
+    #          hjust=0, vjust=0)+
+    labs(title="EMS Calls Incidents vs Average Income at Keymap grids",
+         x="Estimated Average Income",
+         y="Number of EMS incidents")
+
+df_EMS_nite %>% 
+  filter(n<300) %>% 
+  mutate(Avg_income_bin = factor(case_when(
+    Avg_income<25000 ~ "<$25k",
+    Avg_income<50000 ~ "$25k-$50k",
+    Avg_income<75000 ~ "$50k-$75k",
+    TRUE             ~ ">$75k"
+  ))) %>% 
+  #ggplot(aes(y=n, x=Pop)) +
+  #ggplot(aes(x=n, y=Avg_income_bin, color=Daytime)) +
+  ggplot(aes(x=n, y=Avg_income_bin)) +
+    ggridges::geom_density_ridges()
+
+df_EMS_nite %>% 
+  filter(n<300) %>% 
+  mutate(Avg_income_bin = factor(case_when(
+    Avg_income<25000 ~ "<$25k",
+    Avg_income<50000 ~ "$25k-$50k",
+    Avg_income<75000 ~ "$50k-$75k",
+    TRUE             ~ ">$75k"
+  ))) %>% 
+  mutate(Avg_income_bin=fct_relevel(Avg_income_bin,
+                                    "<$25k", "$25k-$50k", "$50k-$75k", ">$75k")) %>% 
+  ggplot(aes(x=n, y=Avg_income_bin, fill=stat(x))) +
+    ggridges::geom_density_ridges_gradient()+
+  scale_fill_viridis_c(name = "Calls", option = "C")+
+  labs(title="Number of Nighttime EMS Calls vs. Average Income",
+       x="Number of EMS Calls",
+       y="Average Income (in bins)")
+
+df_EMS_nite %>% 
+  filter(n<300) %>% 
+  mutate(n_bin = factor(case_when(
+    n<50 ~ "<50",
+    n<100 ~ "50-100",
+    n<150 ~ "100-150",
+    TRUE  ~ ">150"
+  ))) %>% 
+  mutate(n_bin=fct_relevel(n_bin,"<50", "50-100", "100-150", ">150")) %>% 
+  ggplot(aes(y=n_bin, x=Avg_income, fill=stat(x))) +
+    ggridges::geom_density_ridges_gradient()+
+  scale_fill_viridis_c(name = "Average Income", option = "C")+
+  scale_x_continuous(labels=scales::dollar_format())+
+  labs(title="Number of Nighttime EMS Calls vs. Average Income",
+       x="Average Income",
+       y="Number of EMS calls (in bins)")
+
+
+
+
+bins <- c(0:10*0.20, Inf)
+pal <- colorBin("YlOrRd", domain = df_EMS$n, bins = bins)
+
+leaflet(df_EMS_nite %>% mutate(n=n/mean(df_EMS$n))) %>% 
+#leaflet(df_EMS_day) %>% 
+  leaflet::setView(lng = -95.3103, lat = 29.7752, zoom = 9 ) %>%   
+  addTiles() %>% 
+  addPolygons(popup = ~Key, weight=1,
+              fillColor = ~pal(n),
+              fillOpacity = 0.5) 
 
 
 
@@ -257,11 +432,6 @@ foo %>%
 
 #   First just raw numbers
 
-df_EMS_day <- df_all_poly %>% 
-  filter(Category=="EMS") %>% 
-  filter(n>10) %>% 
-  filter(Daytime)
-
 df_EMS_day %>% 
   filter(n>50) %>%  
 ggplot() +
@@ -269,10 +439,6 @@ ggplot() +
   geom_sf(aes(fill=n), alpha=0.3)+
   scale_fill_gradientn(colors=rainbow(5), limits=c(50,300))
 
-df_EMS_nite <- df_all_poly %>% 
-  filter(Category=="EMS") %>% 
-  filter(n>10) %>% 
-  filter(!Daytime)
 
 df_EMS_nite %>% 
   filter(n>50) %>%  
