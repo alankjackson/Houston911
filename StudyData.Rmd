@@ -46,6 +46,7 @@ df <- df %>%
          Key=`Key Map`)
 
 df <- df %>% 
+  mutate(Incident_type=stringr::str_replace(Incident_type, "Dumpster", "Dumpster Fire")) %>% 
   mutate(Incident_type=stringr::str_replace(Incident_type, "fire", "Fire")) %>% 
   mutate(Incident_type=stringr::str_replace(Incident_type, "FIRE", "Fire")) %>% 
   mutate(Incident_type=stringr::str_replace(Incident_type, "EVENT", "Event")) %>% 
@@ -66,6 +67,7 @@ df_summary <- df %>%
 
 df <- df %>% 
   mutate(Category=case_when(
+    str_detect(Incident_type, "Dumpster") ~ "Dumpster fire",
     str_detect(Incident_type, "Fire") ~ "Fire",
     str_detect(Incident_type, "EMS") ~ "EMS",
     str_detect(Incident_type, "Check Patient") ~ "Check Patient",
@@ -264,6 +266,8 @@ Some keymap names are consistently entered incorrectly. Many of the calls to
 575H are really just to the east in 576E (Redford Apartments). Population
 estimates for some keymap blocks are way off. 
 
+https://abc13.com/apartment-complex-task-force-the-redford-apartments-investigation-massive-southeast-houston-fire/12304497/
+
 ```{r plots}
 
 #   Time evolution of Redford calls
@@ -360,18 +364,6 @@ df_EMS %>%
          x="Estimated Average Income",
          y="Number of EMS incidents")
 
-df_EMS_nite %>% 
-  filter(n<300) %>% 
-  mutate(Avg_income_bin = factor(case_when(
-    Avg_income<25000 ~ "<$25k",
-    Avg_income<50000 ~ "$25k-$50k",
-    Avg_income<75000 ~ "$50k-$75k",
-    TRUE             ~ ">$75k"
-  ))) %>% 
-  #ggplot(aes(y=n, x=Pop)) +
-  #ggplot(aes(x=n, y=Avg_income_bin, color=Daytime)) +
-  ggplot(aes(x=n, y=Avg_income_bin)) +
-    ggridges::geom_density_ridges()
 
 df_EMS_nite %>% 
   filter(n<300) %>% 
@@ -524,7 +516,7 @@ dfnew %>%
   addMarkers(clusterOptions = markerClusterOptions())
 
 dfnew %>%
-  filter(str_detect(Incident_type, "CRASH")) %>% 
+  filter(str_detect(Incident_type, "Crash")) %>% 
   leaflet() %>% 
   addTiles() %>% 
   addMarkers(clusterOptions = markerClusterOptions(),
@@ -532,6 +524,27 @@ dfnew %>%
 
 dfnew %>%
   filter(str_detect(Incident_type, "Fire")) %>% 
+  leaflet() %>% 
+  addTiles() %>% 
+  addMarkers(clusterOptions = markerClusterOptions(),
+             label=~as.character(Key))
+
+dfnew %>%
+  filter(str_detect(Incident_type, "Electrical")) %>% 
+  leaflet() %>% 
+  addTiles() %>% 
+  addMarkers(clusterOptions = markerClusterOptions(),
+             label=~as.character(Key))
+
+dfnew %>%
+  filter(str_detect(Incident_type, "Gas Leak")) %>% 
+  leaflet() %>% 
+  addTiles() %>% 
+  addMarkers(clusterOptions = markerClusterOptions(),
+             label=~as.character(Key))
+
+dfnew %>%
+  filter(str_detect(Incident_type, "Pedestrian")) %>% 
   leaflet() %>% 
   addTiles() %>% 
   addMarkers(clusterOptions = markerClusterOptions(),
